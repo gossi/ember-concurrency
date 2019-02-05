@@ -1,9 +1,13 @@
+import { computed } from '@ember/object';
+import { addObserver } from '@ember/object/observers';
+import { addListener } from '@ember/object/events';
 import { timeout, forever } from './utils';
-import { TaskProperty } from './-task-property';
+import { Task, TaskProperty } from './-task-property';
 import { didCancel } from './-task-instance';
-import { TaskGroupProperty } from './-task-group';
+import { TaskGroup, TaskGroupProperty } from './-task-group';
 import { all, allSettled, hash, race } from './-cancelable-promise-helpers';
 import { waitForQueue, waitForEvent, waitForProperty } from './-wait-for';
+import { resolveScheduler } from './-property-modifiers-mixin';
 
 /**
  * A Task is a cancelable, restartable, asynchronous operation that
@@ -50,8 +54,107 @@ import { waitForQueue, waitForEvent, waitForProperty } from './-wait-for';
  * @param {function} generatorFunction the generator function backing the task.
  * @returns {TaskProperty}
  */
-export function task(...args) {
-  return new TaskProperty(...args);
+export function task(taskFn) {
+  let tp = function() {
+    let cp = computed(function(_propertyName) {
+      taskFn.displayName = `${_propertyName} (task)`;
+      return Task.create({
+        fn: taskFn,
+        context: this,
+        _origin: this,
+        _taskGroupPath: tp._taskGroupPath,
+        _scheduler: resolveScheduler(tp, this, TaskGroup),
+        _propertyName,
+        _debug: tp._debug,
+        _hasEnabledEvents: tp._hasEnabledEvents,
+      });
+    });
+    let elementDesc = Object.apply.call(cp, cp, arguments);
+
+    tp.eventNames = null;
+    tp.cancelEventNames = null;
+    tp._observes = null;
+
+    let computedFinisher = elementDesc.finisher;
+
+    elementDesc.finisher = function(klass) {
+      computedFinisher(...arguments);
+
+      let obj = klass.prototype !== undefined ? klass.prototype : klass;
+
+      if (tp._maxConcurrency !== Infinity && !tp._hasSetBufferPolicy) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `The use of maxConcurrency() without a specified task modifier is deprecated and won't be supported in future versions of ember-concurrency. Please specify a task modifier instead, e.g. \`${taskName}: task(...).enqueue().maxConcurrency(${
+            tp._maxConcurrency
+          })\``
+        );
+      }
+
+      registerOnPrototype(
+        addListener,
+        obj,
+        tp.eventNames,
+        elementDesc.key,
+        'perform',
+        false
+      );
+      registerOnPrototype(
+        addListener,
+        obj,
+        tp.cancelEventNames,
+        elementDesc.key,
+        'cancelAll',
+        false
+      );
+      registerOnPrototype(
+        addObserver,
+        obj,
+        tp._observes,
+        elementDesc.key,
+        'perform',
+        true
+      );
+    };
+
+    return elementDesc;
+  };
+
+  Object.setPrototypeOf(tp, TaskProperty.prototype);
+  Ember._setComputedDecorator(tp);
+
+  return tp;
+}
+
+function registerOnPrototype(
+  addListenerOrObserver,
+  proto,
+  names,
+  taskName,
+  taskMethod,
+  once
+) {
+  if (names) {
+    for (let i = 0; i < names.length; ++i) {
+      let name = names[i];
+
+      let handlerName = `__ember_concurrency_handler_${handlerCounter++}`;
+      proto[handlerName] = makeTaskCallback(taskName, taskMethod, once);
+      addListenerOrObserver(proto, name, null, handlerName);
+    }
+  }
+}
+
+function makeTaskCallback(taskName, method, once) {
+  return function() {
+    let task = this.get(taskName);
+
+    if (once) {
+      scheduleOnce('actions', task, method, ...arguments);
+    } else {
+      task[method].apply(task, arguments);
+    }
+  };
 }
 
 /**
@@ -74,9 +177,26 @@ export function task(...args) {
  * ```
  *
  * @returns {TaskGroup}
-*/
+ */
 export function taskGroup(...args) {
-  return new TaskGroupProperty(...args);
+  let tp = function() {
+    let elementDesc = computed(function(_propertyName) {
+      taskFn.displayName = `${_propertyName} (task)`;
+      return TaskGroup.create({
+        fn: taskFn,
+        context: this,
+        _origin: this,
+        _taskGroupPath: tp._taskGroupPath,
+        _scheduler: resolveScheduler(tp, this, TaskGroup),
+        _propertyName,
+      });
+    })(...arguments);
+  };
+
+  Object.setPrototypeOf(tp, TaskGroupProperty.prototype);
+  Ember._setComputedDecorator(tp);
+
+  return tp;
 }
 
 export {
@@ -89,5 +209,5 @@ export {
   waitForQueue,
   waitForEvent,
   waitForProperty,
-  forever
+  forever,
 };
