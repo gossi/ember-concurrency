@@ -1,21 +1,58 @@
 import { or, bool } from '@ember/object/computed';
 import EmberObject from '@ember/object';
-import { objectAssign } from './utils';
+import { objectAssign, _ComputedProperty } from './utils';
 import TaskStateMixin from './-task-state-mixin';
-import { propertyModifiers } from './-property-modifiers-mixin';
+import { propertyModifiers, resolveScheduler } from './-property-modifiers-mixin';
+import { gte } from 'ember-compatibility-helpers';
 
-export const TaskGroup = EmberObject.extend(TaskStateMixin, {
-  isTaskGroup: true,
+let TaskGroup, TaskGroupProperty;
 
-  toString() {
-    return `<TaskGroup:${this._propertyName}>`;
-  },
+if (gte('3.9.0-beta.1')) {
+  TaskGroup = EmberObject.extend(TaskStateMixin, {
+    isTaskGroup: true,
 
-  _numRunningOrNumQueued: or('numRunning', 'numQueued'),
-  isRunning: bool('_numRunningOrNumQueued'),
-  isQueued: false,
-});
+    toString() {
+      return `<TaskGroup:${this._propertyName}>`;
+    },
 
-export class TaskGroupProperty {}
+    _numRunningOrNumQueued: or('numRunning', 'numQueued'),
+    isRunning: bool('_numRunningOrNumQueued'),
+    isQueued: false,
+  });
+
+  TaskGroupProperty = class { }
+
+} else {
+  TaskGroup = EmberObject.extend(TaskStateMixin, {
+    isTaskGroup: true,
+
+    toString() {
+      return `<TaskGroup:${this._propertyName}>`;
+    },
+
+    _numRunningOrNumQueued: or('numRunning', 'numQueued'),
+    isRunning: bool('_numRunningOrNumQueued'),
+    isQueued:  false
+  });
+
+  TaskGroupProperty = class extends _ComputedProperty {
+    constructor(taskFn) {
+      let tp;
+      super(function (_propertyName) {
+        return TaskGroup.create({
+          fn: taskFn,
+          context: this,
+          _origin: this,
+          _taskGroupPath: tp._taskGroupPath,
+          _scheduler: resolveScheduler(tp, this, TaskGroup),
+          _propertyName,
+        });
+      });
+      tp = this;
+    }
+  }
+}
 
 objectAssign(TaskGroupProperty.prototype, propertyModifiers);
+
+export { TaskGroup, TaskGroupProperty };

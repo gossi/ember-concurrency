@@ -1,21 +1,16 @@
-import { scheduleOnce } from '@ember/runloop';
-import EmberObject from '@ember/object';
 import { getOwner } from '@ember/application';
-import { default as TaskInstance, getRunningInstance } from './-task-instance';
-import {
-  PERFORM_TYPE_DEFAULT,
-  PERFORM_TYPE_UNLINKED,
-  PERFORM_TYPE_LINKED,
-} from './-task-instance';
-import TaskStateMixin from './-task-state-mixin';
-import { TaskGroup } from './-task-group';
-import {
-  propertyModifiers,
-  resolveScheduler,
-} from './-property-modifiers-mixin';
-import { objectAssign, INVOKE, _cleanupOnDestroy } from './utils';
-import EncapsulatedTask from './-encapsulated-task';
 import { deprecate } from '@ember/debug';
+import EmberObject from '@ember/object';
+import { addListener } from '@ember/object/events';
+import { addObserver } from '@ember/object/observers';
+import { scheduleOnce } from '@ember/runloop';
+import { gte } from 'ember-compatibility-helpers';
+import EncapsulatedTask from './-encapsulated-task';
+import { propertyModifiers, resolveScheduler } from './-property-modifiers-mixin';
+import { TaskGroup } from './-task-group';
+import { default as TaskInstance, getRunningInstance, PERFORM_TYPE_DEFAULT, PERFORM_TYPE_LINKED, PERFORM_TYPE_UNLINKED } from './-task-instance';
+import TaskStateMixin from './-task-state-mixin';
+import { INVOKE, objectAssign, _cleanupOnDestroy, _ComputedProperty } from './utils';
 
 const PerformProxy = EmberObject.extend({
   _task: null,
@@ -395,6 +390,75 @@ export const Task = EmberObject.extend(TaskStateMixin, {
   },
 });
 
+let BaseTaskProperty;
+
+if (gte('3.9.0-beta.1')) {
+  BaseTaskProperty = class { }
+} else {
+  BaseTaskProperty = class extends _ComputedProperty {
+
+    constructor(taskFn) {
+      let tp;
+      super(function (_propertyName) {
+        taskFn.displayName = `${_propertyName} (task)`;
+        return Task.create({
+          fn: tp.taskFn,
+          context: this,
+          _origin: this,
+          _taskGroupPath: tp._taskGroupPath,
+          _scheduler: resolveScheduler(tp, this, TaskGroup),
+          _propertyName,
+          _debug: tp._debug,
+          _hasEnabledEvents: tp._hasEnabledEvents
+        });
+      });
+      tp = this;
+      this.taskFn = taskFn;
+      this.eventNames = null;
+      this.cancelEventNames = null;
+      this._observes = null;
+    }
+
+    setup(proto, taskName) {
+      if (super.setup) {
+        super.setup(...arguments);
+      }
+      if (this._maxConcurrency !== Infinity && !this._hasSetBufferPolicy) {
+        // eslint-disable-next-line no-console
+        console.warn(`The use of maxConcurrency() without a specified task modifier is deprecated and won't be supported in future versions of ember-concurrency. Please specify a task modifier instead, e.g. \`${taskName}: task(...).enqueue().maxConcurrency(${this._maxConcurrency})\``);
+      }
+
+      registerOnPrototype(addListener, proto, this.eventNames, taskName, 'perform', false);
+      registerOnPrototype(addListener, proto, this.cancelEventNames, taskName, 'cancelAll', false);
+      registerOnPrototype(addObserver, proto, this._observes, taskName, 'perform', true);
+    }
+  }
+
+  const registerOnPrototype = function (addListenerOrObserver, proto, names, taskName, taskMethod, once) {
+    if (names) {
+      for (let i = 0; i < names.length; ++i) {
+        let name = names[i];
+
+        let handlerName = `__ember_concurrency_handler_${handlerCounter++}`;
+        proto[handlerName] = makeTaskCallback(taskName, taskMethod, once);
+        addListenerOrObserver(proto, name, null, handlerName);
+      }
+    }
+  }
+
+  const makeTaskCallback = function (taskName, method, once) {
+    return function() {
+      let task = this.get(taskName);
+
+      if (once) {
+        scheduleOnce('actions', task, method, ...arguments);
+      } else {
+        task[method].apply(task, arguments);
+      }
+    };
+  }
+}
+
 /**
   A {@link TaskProperty} is the Computed Property-like object returned
   from the {@linkcode task} function. You can call Task Modifier methods
@@ -411,7 +475,7 @@ export const Task = EmberObject.extend(TaskStateMixin, {
 
   @class TaskProperty
 */
-export class TaskProperty {
+export class TaskProperty extends BaseTaskProperty {
   /**
    * Calling `task(...).on(eventName)` configures the task to be
    * automatically performed when the specified events fire. In
